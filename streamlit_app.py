@@ -141,7 +141,9 @@ def _procesar_rsl(subidos, acumular: bool) -> None:
 def _para_panel(pub: pd.DataFrame) -> pd.DataFrame:
     df = pub.copy()
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce").dt.date
-    for c in ("contactado", "contestador", "gestion_agente", "tipificado"):
+    for c in ("contactado", "contestador", "gestion_agente", "tipificado", "venta"):
+        if c not in df.columns:
+            df[c] = 0
         df[c] = df[c].fillna(0).astype(bool)
     df["agente_id"] = df["agente_id"].fillna("").astype(str).str.strip()
     return df
@@ -230,7 +232,7 @@ with st.expander("Ver detalle de registros (máx. 3000)"):
     cols = [c for c in ["fecha", "hora", "origen", "turno", "campania", "resultado",
                         "resultado_familia", "intento", "region", "servicio_destino",
                         "localidad", "base", "lista_origen", "gestion_agente",
-                        "tipificacion", "agente_id"] if c in d.columns]
+                        "tipificacion", "venta", "agente_id"] if c in d.columns]
     st.dataframe(d[cols].head(3000), width='stretch', hide_index=True)
 
 st.download_button(

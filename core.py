@@ -45,7 +45,7 @@ COLUMNS = [
     "fecha", "archivo", "record_id",
     "origen", "turno", "hora", "call_time",
     "telefono", "resultado", "resultado_familia", "intento",
-    "contactado", "contestador", "gestion_agente", "tipificado", "tipificacion",
+    "contactado", "contestador", "gestion_agente", "tipificado", "tipificacion", "venta",
     "campania", "region", "servicio_destino", "localidad", "base",
     "lista_origen", "codigo_base",
     "agente_id", "switch_id", "campania_id", "grupo_id",
@@ -83,6 +83,20 @@ FAMILIA_COLORES = {
     "No llamar": "#BF2600",
     "Otros": "#505F79",
 }
+
+# --- Tipificaciones que cuentan como VENTA ("preventa") -----------------
+# En los .rsl la venta lograda por el TMK se tipifica como Preventa / Preventa_BAF
+# / Preventa_Linea_Nueva. Cualquier DISPOSITIONCODE que empiece con "Preventa"
+# se toma como venta.
+VENTA_TIPIS = {"Preventa", "Preventa_BAF", "Preventa_Linea_Nueva"}
+VENTA_COLOR = "#00C7E6"
+
+
+def es_venta(tip) -> bool:
+    if not tip:
+        return False
+    t = str(tip).strip()
+    return t in VENTA_TIPIS or t.lower().startswith("preventa")
 
 
 # ----------------------------- Parseo -----------------------------------
@@ -154,6 +168,7 @@ def normalizar(d: dict, archivo: str, origen: str, turno: str, importado_en: str
         "gestion_agente": 1 if (agente != "" or switch == 102) else 0,
         "tipificado": 1 if tip else 0,
         "tipificacion": tip,
+        "venta": 1 if es_venta(tip) else 0,
         "campania": r["campania"].strip(),
         "region": r["region"].strip(),
         "servicio_destino": r["servicio_destino"].strip(),
@@ -209,7 +224,7 @@ def rsl_bytes_a_filas(data: bytes, nombre: str) -> list[tuple]:
 PUBLICAS = [
     "fecha", "archivo", "record_id", "hora", "telefono",
     "origen", "turno", "campania", "resultado", "resultado_familia", "intento",
-    "contactado", "contestador", "gestion_agente", "tipificado", "tipificacion",
+    "contactado", "contestador", "gestion_agente", "tipificado", "tipificacion", "venta",
     "region", "servicio_destino", "localidad", "base", "lista_origen", "agente_id",
 ]
 
@@ -226,7 +241,9 @@ def sanitizar(df, salt: str):
     """DataFrame con columnas de `llamadas` -> subconjunto PUBLICAS con tel. hasheado."""
     d = df.copy()
     d["telefono"] = d["telefono"].map(lambda x: hash_telefono(x, salt))
-    for c in ("contactado", "contestador", "gestion_agente", "tipificado"):
+    for c in ("contactado", "contestador", "gestion_agente", "tipificado", "venta"):
+        if c not in d.columns:
+            d[c] = 0
         d[c] = d[c].fillna(0).astype("int8")
     d["agente_id"] = d["agente_id"].fillna("").astype(str).str.strip()
     for c in PUBLICAS:
@@ -239,7 +256,7 @@ def sanitizar(df, salt: str):
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS llamadas (
     {", ".join(c + (" INTEGER" if c in
-        ("hora","intento","contactado","contestador","gestion_agente","tipificado",
+        ("hora","intento","contactado","contestador","gestion_agente","tipificado","venta",
          "switch_id","campania_id","grupo_id","cliente_con_datos")
         else " TEXT") for c in COLUMNS)},
     PRIMARY KEY (fecha, archivo, record_id)
@@ -266,7 +283,19 @@ class DB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.executescript(SCHEMA)
+        self._migrar()
         self.conn.commit()
+
+    def _migrar(self):
+        """Migraciones de esquema sobre bases ya existentes."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(llamadas)")}
+        if "venta" not in cols:
+            self.conn.execute("ALTER TABLE llamadas ADD COLUMN venta INTEGER")
+            self.conn.execute(
+                "UPDATE llamadas SET venta = "
+                "CASE WHEN tipificacion LIKE 'Preventa%' THEN 1 ELSE 0 END"
+            )
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -362,11 +391,13 @@ class DB:
         row = self.conn.execute(
             f"""SELECT COUNT(*), COUNT(DISTINCT telefono),
                        COALESCE(SUM(contactado),0), COALESCE(SUM(contestador),0),
-                       COALESCE(SUM(gestion_agente),0), COALESCE(SUM(tipificado),0)
+                       COALESCE(SUM(gestion_agente),0), COALESCE(SUM(tipificado),0),
+                       COALESCE(SUM(venta),0)
                 FROM llamadas {w}""", p
         ).fetchone()
         k = dict(zip(
-            ("llamadas", "telefonos", "contacto", "contestador", "agente", "tipificadas"), row))
+            ("llamadas", "telefonos", "contacto", "contestador", "agente",
+             "tipificadas", "ventas"), row))
         return k
 
     def por_agente(self, f: dict):
@@ -377,6 +408,7 @@ class DB:
             f"""SELECT agente_id AS tmk, COUNT(*) AS gestiones,
                        COALESCE(SUM(contactado),0) AS contacto,
                        COALESCE(SUM(tipificado),0) AS tipificadas,
+                       COALESCE(SUM(venta),0) AS ventas,
                        COUNT(DISTINCT fecha) AS dias
                 FROM llamadas {w}
                 GROUP BY agente_id ORDER BY gestiones DESC""",
@@ -397,7 +429,7 @@ class DB:
             f"""SELECT fecha, hora, telefono, origen, turno, campania,
                        resultado, resultado_familia, intento, region,
                        servicio_destino, localidad, base, lista_origen,
-                       gestion_agente, tipificacion, agente_id
+                       gestion_agente, tipificacion, venta, agente_id
                 FROM llamadas {w} ORDER BY call_time LIMIT {int(limit)}""",
             self.conn, params=p)
 

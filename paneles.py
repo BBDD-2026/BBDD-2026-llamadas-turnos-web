@@ -21,6 +21,19 @@ import streamlit as st
 
 ACCENT = "#4C9AFF"
 GRID = "#2A2F3A"
+VENTA_COLOR = "#00C7E6"
+VENTA_TIPIS = {"Preventa", "Preventa_BAF", "Preventa_Linea_Nueva"}
+
+
+def _con_venta(d: pd.DataFrame) -> pd.DataFrame:
+    """Garantiza la columna booleana `venta` (tipificación de preventa)."""
+    d = d.copy()
+    if "venta" in d.columns:
+        d["venta"] = d["venta"].fillna(0).astype(bool)
+    else:
+        tip = d.get("tipificacion", pd.Series("", index=d.index)).fillna("").astype(str).str.strip()
+        d["venta"] = tip.isin(VENTA_TIPIS) | tip.str.lower().str.startswith("preventa")
+    return d
 FAM_COLORS = {
     "Contacto humano": "#36B37E",
     "Contestador": "#FFAB00",
@@ -51,13 +64,15 @@ def layout(fig, h=360, legend=True):
 
 
 def kpi_row(d: pd.DataFrame) -> None:
+    d = _con_venta(d)
     llamadas = len(d)
     contactos = int(d["contactado"].sum())
     con_agente = int(d["gestion_agente"].sum())
     tipificadas = int(d["tipificado"].sum())
     contestador = int(d["contestador"].sum())
+    ventas = int(d["venta"].sum())
 
-    k = st.columns(6)
+    k = st.columns(7)
     k[0].metric("Llamadas", f"{llamadas:,}")
     k[1].metric("Teléfonos únicos", f"{d['telefono'].nunique():,}")
     k[2].metric("Contacto humano", f"{contactos:,}", f"{contactos / llamadas:.1%}")
@@ -66,13 +81,17 @@ def kpi_row(d: pd.DataFrame) -> None:
     k[4].metric("Con agente", f"{con_agente:,}", f"{con_agente / llamadas:.1%}")
     k[5].metric("Tipificadas", f"{tipificadas:,}",
                 f"{tipificadas / con_agente:.1%} de gestión" if con_agente else "—")
+    k[6].metric("Ventas (preventa)", f"{ventas:,}",
+                f"{ventas / tipificadas:.1%} de tipif." if tipificadas else "—")
 
 
 def tab_general(d: pd.DataFrame) -> None:
+    d = _con_venta(d)
     llamadas = len(d)
     contactos = int(d["contactado"].sum())
     con_agente = int(d["gestion_agente"].sum())
     tipificadas = int(d["tipificado"].sum())
+    ventas = int(d["venta"].sum())
 
     # ----------------------------- Fila 1 ------------------------------
     c1, c2 = st.columns([1, 1.3])
@@ -80,13 +99,14 @@ def tab_general(d: pd.DataFrame) -> None:
     with c1:
         st.subheader("Embudo de la jornada")
         etapas = pd.DataFrame({
-            "Etapa": ["Llamadas", "Contacto humano", "Gestión con agente", "Tipificadas"],
-            "Valor": [llamadas, contactos, con_agente, tipificadas],
+            "Etapa": ["Llamadas", "Contacto humano", "Gestión con agente",
+                      "Tipificadas", "Ventas (preventa)"],
+            "Valor": [llamadas, contactos, con_agente, tipificadas, ventas],
         })
         fig = go.Figure(go.Funnel(
             y=etapas["Etapa"], x=etapas["Valor"],
             textinfo="value+percent initial",
-            marker=dict(color=[ACCENT, "#36B37E", "#6554C0", "#FFAB00"]),
+            marker=dict(color=[ACCENT, "#36B37E", "#6554C0", "#FFAB00", VENTA_COLOR]),
         ))
         st.plotly_chart(layout(fig, h=320, legend=False), width='stretch')
 
@@ -154,8 +174,12 @@ def tab_general(d: pd.DataFrame) -> None:
         if tip.empty:
             st.info("Sin tipificaciones en la selección.")
         else:
-            fig = px.bar(tip, x="Llamadas", y="Tipificación", orientation="h")
-            fig.update_traces(marker_color="#36B37E")
+            tip["Tipo"] = tip["Tipificación"].str.lower().str.startswith("preventa").map(
+                {True: "Venta (preventa)", False: "Otras"})
+            fig = px.bar(tip, x="Llamadas", y="Tipificación", orientation="h",
+                         color="Tipo",
+                         color_discrete_map={"Venta (preventa)": VENTA_COLOR,
+                                             "Otras": "#36B37E"})
             st.plotly_chart(layout(fig, h=380, legend=False), width='stretch')
 
     with c6:
@@ -188,9 +212,11 @@ def tab_general(d: pd.DataFrame) -> None:
             contestador=("contestador", "sum"),
             con_agente=("gestion_agente", "sum"),
             tipificadas=("tipificado", "sum"),
+            ventas=("venta", "sum"),
         ).reset_index()
         piv["% contacto"] = (piv["contacto"] / piv["llamadas"] * 100).round(1)
         piv["% contestador"] = (piv["contestador"] / piv["llamadas"] * 100).round(1)
+        piv["% venta"] = (piv["ventas"] / piv["tipificadas"].replace(0, pd.NA) * 100).round(1)
         st.dataframe(piv, width='stretch', hide_index=True)
 
     # ----------------------------- Evolución diaria -------------------
@@ -201,6 +227,7 @@ def tab_general(d: pd.DataFrame) -> None:
             contacto=("contactado", "sum"),
             con_agente=("gestion_agente", "sum"),
             tipificadas=("tipificado", "sum"),
+            ventas=("venta", "sum"),
         ).reset_index()
         ev["% contacto"] = ev["contacto"] / ev["llamadas"]
         fig = px.bar(ev, x="fecha", y="llamadas")
@@ -208,12 +235,16 @@ def tab_general(d: pd.DataFrame) -> None:
         fig.add_trace(go.Scatter(
             x=ev["fecha"], y=ev["% contacto"], name="% contacto", yaxis="y2",
             mode="lines+markers", line=dict(color="#36B37E", width=2)))
+        fig.add_trace(go.Bar(
+            x=ev["fecha"], y=ev["ventas"], name="Ventas (preventa)",
+            marker_color=VENTA_COLOR))
         fig.update_layout(yaxis2=dict(overlaying="y", side="right", tickformat=".0%",
                                       showgrid=False, title="% contacto"))
         st.plotly_chart(layout(fig, h=340), width='stretch')
 
 
 def tab_tmk(d: pd.DataFrame) -> None:
+    d = _con_venta(d)
     ag = d[d["agente_id"].fillna("").astype(str).str.strip() != ""].copy()
     ag["agente_id"] = ag["agente_id"].astype(str).str.strip()
 
@@ -228,14 +259,17 @@ def tab_tmk(d: pd.DataFrame) -> None:
     gest = len(ag)
     tipif = int(ag["tipificado"].sum())
     cont = int(ag["contactado"].sum())
+    vent = int(ag["venta"].sum())
     dias = ag["fecha"].nunique()
 
-    kt = st.columns(5)
+    kt = st.columns(6)
     kt[0].metric("TMK activos", f"{n_tmk:,}")
     kt[1].metric("Gestiones", f"{gest:,}")
     kt[2].metric("Tipificadas", f"{tipif:,}", f"{tipif / gest:.1%}")
     kt[3].metric("Contacto", f"{cont:,}", f"{cont / gest:.1%}")
-    kt[4].metric("Gestiones / TMK", f"{gest / n_tmk:,.0f}",
+    kt[4].metric("Ventas (preventa)", f"{vent:,}",
+                 f"{vent / tipif:.1%} de tipif." if tipif else None)
+    kt[5].metric("Gestiones / TMK", f"{gest / n_tmk:,.0f}",
                  f"{gest / n_tmk / dias:,.0f} por día" if dias else None)
     st.divider()
 
@@ -243,10 +277,12 @@ def tab_tmk(d: pd.DataFrame) -> None:
         gestiones=("telefono", "size"),
         contacto=("contactado", "sum"),
         tipificadas=("tipificado", "sum"),
+        ventas=("venta", "sum"),
         dias=("fecha", "nunique"),
     ).reset_index()
     tab["% contacto"] = (tab["contacto"] / tab["gestiones"] * 100).round(1)
     tab["% tipif"] = (tab["tipificadas"] / tab["gestiones"] * 100).round(1)
+    tab["% venta"] = (tab["ventas"] / tab["tipificadas"].replace(0, pd.NA) * 100).round(1)
     tab["gest/día"] = (tab["gestiones"] / tab["dias"]).round(1)
 
     top_tip = (ag[ag["tipificado"]]
@@ -279,7 +315,7 @@ def tab_tmk(d: pd.DataFrame) -> None:
     st.caption("Clic en el encabezado de una columna para ordenar.")
     st.dataframe(
         tab[["TMK", "gestiones", "contacto", "% contacto", "tipificadas",
-             "% tipif", "dias", "gest/día", "tipif. principal"]],
+             "% tipif", "ventas", "% venta", "dias", "gest/día", "tipif. principal"]],
         width='stretch', hide_index=True, height=460,
     )
     st.download_button(
@@ -314,8 +350,11 @@ def tab_tmk(d: pd.DataFrame) -> None:
             ev = fa.groupby("fecha").agg(
                 gestiones=("telefono", "size"),
                 tipificadas=("tipificado", "sum"),
+                ventas=("venta", "sum"),
             ).reset_index()
-            fig = px.bar(ev, x="fecha", y=["gestiones", "tipificadas"], barmode="group")
+            fig = px.bar(ev, x="fecha", y=["gestiones", "tipificadas", "ventas"],
+                         barmode="group",
+                         color_discrete_map={"ventas": VENTA_COLOR})
             st.plotly_chart(layout(fig, h=320), width='stretch')
         with f2:
             st.caption(f"TMK {foco} · tipificaciones")
