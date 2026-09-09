@@ -106,6 +106,14 @@ def cargar(_mtime: float) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def fechas_cargadas(_mtime: float) -> list[str]:
+    if not PARQUET.exists():
+        return []
+    s = pd.read_parquet(PARQUET, columns=["fecha"])["fecha"].dropna().astype(str)
+    return sorted(s.unique().tolist())
+
+
 # ---- barra lateral ----
 with st.sidebar:
     lc, bc = st.columns([2, 1])
@@ -115,7 +123,15 @@ with st.sidebar:
         st.rerun()
 
 st.sidebar.header("Datos")
+_fc = fechas_cargadas(PARQUET.stat().st_mtime if PARQUET.exists() else 0.0)
+if _fc:
+    _rango = _fc[0] if len(_fc) == 1 else f"{_fc[0]} → {_fc[-1]}"
+    st.sidebar.caption(
+        f"📅 Cargadas: {_rango}  ·  {len(_fc)} jornada" + ("s" if len(_fc) != 1 else ""))
 with st.sidebar.expander("Actualizar consolidado"):
+    if _fc:
+        st.caption("Fechas en el consolidado:")
+        st.code("\n".join(_fc), language=None)
     st.caption(
         "Subí el `publico.parquet` que genera `publicar.py`. Actualiza esta "
         "instancia hasta el próximo reinicio; para que quede fijo, corré "
