@@ -1,51 +1,55 @@
 # Panel Llamadas_Turnos — versión online
 
-Dashboard público (con contraseña) del discador. **No contiene datos sensibles**:
-el consolidado `data/publico.parquet` viene con el teléfono hasheado y sin
-nombres ni datos de clientes. Lo genera `publicar.py` en la máquina donde están
-los `.rsl`.
+Dashboard del discador, con login. **No guarda datos.** Cada quien sube los
+`.rsl` del día desde la barra lateral: se parsean y **anonimizan en memoria**
+(el teléfono se reemplaza por un hash de sesión) y se muestra el panel. Al
+recargar la página o reiniciarse la app, los datos se van y hay que volver a
+subirlos. Nada se escribe en disco ni se manda a ningún servidor.
 
 ## Puesta en marcha
 
-Repo: **`BBDD-2026/BBDD-2026-llamadas-turnos-web`** (público). Esta carpeta ya es
-ese repo git (rama `main`, primer push hecho).
+Repo: **`BBDD-2026/BBDD-2026-llamadas-turnos-web`** (público). Esta carpeta es
+ese repo git (rama `main`).
 
-Falta conectar el deploy:
-
-1. Entrá a <https://share.streamlit.io> → **New app** → repo
+1. <https://share.streamlit.io> → **New app** → repo
    `BBDD-2026/BBDD-2026-llamadas-turnos-web`, rama `main`, archivo
    `streamlit_app.py`.
-2. En **Advanced settings → Secrets** pegá:
+2. **Advanced settings → Secrets**:
    ```toml
-   password = "una-clave-para-el-equipo"
+   [passwords]
+   enzo = "..."
+   tmk  = "..."
    ```
-3. Deploy. La URL queda tipo `https://bbdd-2026-llamadas-turnos-web.streamlit.app`.
+   (o `password = "clave-unica"` para una sola clave).
+3. Deploy. URL tipo `https://bbdd-2026-llamadas-turnos-web.streamlit.app`.
 
-## Actualizar los datos
+## Uso
 
-En la máquina de los `.rsl`, después de cargar la jornada del día:
+Barra lateral → **Cargar .rsl** → subís los `.rsl` (o un `.zip` con varios) →
+**Procesar**. El panel se arma con eso. "Sumar a lo ya cargado" acumula varias
+subidas en la misma sesión; "Vaciar datos" limpia.
+
+## Actualizar el CÓDIGO del panel
+
+Sólo cuando cambia la lógica (no hay datos que actualizar). En la máquina del
+proyecto:
 
 ```bash
 python publicar.py --push
 ```
 
-Regenera `web/data/publico.parquet` (sanitizado), hace commit y push. Streamlit
-Community Cloud redeploya solo en ~1 minuto.
-
-- `python publicar.py --dias 60` → publica sólo las últimas 60 jornadas (para
-  que el parquet no crezca de más).
-- Sin `--push` sólo regenera el archivo local (`web/data/publico.parquet`), que
-  también podés subir a mano desde la barra lateral del panel (dura hasta el
-  próximo reinicio de la instancia).
+Sincroniza `streamlit_app.py`, `paneles.py`, `core.py`, `requirements.txt` y
+`.streamlit/config.toml` a esta carpeta y hace commit + push. Community Cloud
+redeploya solo.
 
 ## Archivos
 
 | Archivo | Rol |
 |---|---|
-| `streamlit_app.py` | entrypoint de Community Cloud (login + filtros + tableros) |
+| `streamlit_app.py` | entrypoint de Community Cloud (login + carga en sesión + tableros) |
 | `paneles.py` | render de KPIs y pestañas (copiado del proyecto, no editar acá) |
-| `data/publico.parquet` | consolidado sanitizado (lo pisa `publicar.py`) |
+| `core.py` | parseo `.rsl` + `sanitizar()` (copiado del proyecto) |
 | `requirements.txt` / `.streamlit/config.toml` | los genera `publicar.py` |
 
-> Nunca pongas `.rsl`, `llamadas.db` ni `data/.salt` en este repo. El
-> `.gitignore` ya los bloquea.
+> Este repo **no contiene datos**. El `.gitignore` bloquea `*.rsl`, `*.db`,
+> `*.parquet`, `.salt` y los `secrets.toml`.
