@@ -132,15 +132,7 @@ with st.sidebar.expander("Actualizar consolidado"):
     if _fc:
         st.caption("Fechas en el consolidado:")
         st.code("\n".join(_fc), language=None)
-    st.caption(
-        "⚠️ Acá **no** se suben `.rsl` ni carpetas. Este panel lee un único "
-        "archivo ya anonimizado: **`publico.parquet`**, que se genera con "
-        "`publicar.py` en la máquina donde están los `.rsl`.\n\n"
-        "Lo normal es actualizar con `python publicar.py --push` (redeploy "
-        "automático). Subirlo acá a mano sólo cambia esta instancia hasta el "
-        "próximo reinicio."
-    )
-    up = st.file_uploader("Subir publico.parquet (un solo archivo)", type=["parquet"])
+    up = st.file_uploader("Subir publico.parquet", type=["parquet"])
     if up is not None and st.button("Reemplazar", width='stretch'):
         PARQUET.parent.mkdir(parents=True, exist_ok=True)
         PARQUET.write_bytes(up.getbuffer())
