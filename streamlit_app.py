@@ -1,25 +1,19 @@
 """
 Panel Llamadas_Turnos — versión ONLINE (Streamlit Community Cloud)
 -----------------------------------------------------------------
-Trabaja sobre `data/publico.parquet`, un consolidado SANITIZADO: el teléfono
-está hasheado, no hay nombres ni datos de clientes.
-
-Se puede alimentar de dos formas:
-  1) subiendo los `.rsl` (o un `.zip`) desde la barra lateral: se parsean y
-     anonimizan en el momento (el teléfono se hashea con el secret `salt`);
-  2) subiendo un `publico.parquet` ya armado por `publicar.py`.
+NO guarda datos en ningún lado. Subís los `.rsl` del día (o un `.zip` con
+varios) desde la barra lateral: se parsean y anonimizan EN MEMORIA (el teléfono
+se reemplaza por un hash de sesión) y se muestra el panel. Al cerrar la pestaña
+o reiniciarse la app, los datos se van; hay que volver a subir los `.rsl`.
 
 Acceso protegido por usuario/contraseña (Secrets de la app, sección "Acceso").
-Persistencia: en Community Cloud el disco es efímero. Para que las cargas
-sobrevivan un reinicio, configurar el secret `[github]` (token + repo) o usar
-`python publicar.py --push`.
-
 Este es el entrypoint que usa Streamlit Community Cloud.
 """
 from __future__ import annotations
 
 import hmac
 import io
+import secrets
 import zipfile
 from pathlib import Path
 
@@ -30,10 +24,6 @@ import core
 import paneles
 
 st.set_page_config(page_title="Panel Llamadas_Turnos", page_icon="📞", layout="wide")
-
-HERE = Path(__file__).resolve().parent
-CANDIDATOS = [HERE / "data" / "publico.parquet", HERE / "web" / "data" / "publico.parquet"]
-PARQUET = next((p for p in CANDIDATOS if p.exists()), CANDIDATOS[0])
 
 st.markdown(
     """
@@ -61,9 +51,8 @@ CAT_FILTROS = [
 #   [passwords]
 #   enzo       = "clave-de-enzo"
 #   supervisor = "clave-del-super"
-#   tmk        = "clave-compartida"
 #
-#   # opción B — una sola clave para todo el equipo:
+#   # opción B — una sola clave:
 #   password = "clave-unica"
 def _cred_ok(usuario: str, clave: str) -> bool:
     if not clave:
@@ -101,80 +90,14 @@ def pedir_login() -> None:
 
 pedir_login()
 
-
-# --------------------------------- Datos ---------------------------------
-@st.cache_data(show_spinner="Cargando consolidado…")
-def cargar(_mtime: float) -> pd.DataFrame:
-    df = pd.read_parquet(PARQUET)
-    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce").dt.date
-    for c in ("contactado", "contestador", "gestion_agente", "tipificado"):
-        if c in df.columns:
-            df[c] = df[c].fillna(0).astype(bool)
-    if "agente_id" in df.columns:
-        df["agente_id"] = df["agente_id"].fillna("").astype(str).str.strip()
-    return df
+# sal de sesión: sólo para no tener el número crudo en memoria; se descarta al salir
+SALT = st.session_state.setdefault("_salt", secrets.token_hex(16))
 
 
-@st.cache_data(show_spinner=False)
-def fechas_cargadas(_mtime: float) -> list[str]:
-    if not PARQUET.exists():
-        return []
-    s = pd.read_parquet(PARQUET, columns=["fecha"])["fecha"].dropna().astype(str)
-    return sorted(s.unique().tolist())
-
-
-# ---- barra lateral ----
-with st.sidebar:
-    lc, bc = st.columns([2, 1])
-    lc.caption(f"👤 {st.session_state.get('_auth_user', '')}")
-    if bc.button("Salir", help="Cerrar sesión"):
-        st.session_state.clear()
-        st.rerun()
-
-SALT = str(st.secrets.get("salt", "")).strip()
-
-
-def _persistir_en_repo(contenido: bytes) -> bool:
-    """Si hay secret [github], commitea el parquet al repo (redeploy). Opcional."""
-    conf = st.secrets.get("github", None)
-    if not conf or not conf.get("token"):
-        return False
-    import base64
-    import json
-    import urllib.request
-
-    repo = conf.get("repo", "")
-    ruta = conf.get("path", "data/publico.parquet")
-    rama = conf.get("branch", "main")
-    api = f"https://api.github.com/repos/{repo}/contents/{ruta}"
-    hdr = {"Authorization": f"Bearer {conf['token']}",
-           "Accept": "application/vnd.github+json",
-           "User-Agent": "llamadas-turnos-panel"}
-    sha = None
-    try:
-        with urllib.request.urlopen(
-                urllib.request.Request(f"{api}?ref={rama}", headers=hdr)) as r:
-            sha = json.load(r).get("sha")
-    except Exception:
-        pass
-    cuerpo = json.dumps({
-        "message": "datos: carga desde el panel online",
-        "content": base64.b64encode(contenido).decode(),
-        "branch": rama, **({"sha": sha} if sha else {}),
-    }).encode()
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(api, data=cuerpo, headers=hdr, method="PUT")).read()
-        st.success("Guardado en el repo — la app redeploya en ~1 min.")
-        return True
-    except Exception as e:
-        st.warning(f"No se pudo guardar en el repo ({e}).")
-        return False
-
-
-def _pares_rsl(subidos):
+# --------------------------------- Datos (en sesión) --------------------
+def _pares_rsl(subidos) -> list[tuple[str, bytes]]:
     """Expande .zip; devuelve [(nombre, bytes), ...] solo de los .rsl."""
-    pares = []
+    pares: list[tuple[str, bytes]] = []
     for uf in subidos:
         nombre, datos = uf.name, uf.getvalue()
         if nombre.lower().endswith(".zip"):
@@ -187,11 +110,7 @@ def _pares_rsl(subidos):
     return pares
 
 
-def _procesar_rsl(subidos) -> None:
-    if not SALT:
-        st.error("Falta el secret `salt` (una cadena aleatoria fija) para "
-                 "anonimizar los teléfonos. Agregalo en Settings → Secrets.")
-        return
+def _procesar_rsl(subidos, acumular: bool) -> None:
     pares = _pares_rsl(subidos)
     if not pares:
         st.warning("No se encontraron `.rsl` en lo subido.")
@@ -206,73 +125,64 @@ def _procesar_rsl(subidos) -> None:
     bar.empty()
     pub = pd.concat(partes, ignore_index=True)
 
-    antes = 0
-    if PARQUET.exists():
-        actual = pd.read_parquet(PARQUET)
-        if "archivo" not in actual.columns:
-            actual["archivo"] = "historico"
-        if "record_id" not in actual.columns:
-            actual["record_id"] = actual.index.astype(str)
-        antes = len(actual)
-        pub = pd.concat([actual, pub], ignore_index=True)
-
-    for c in core.PUBLICAS:
-        if c not in pub.columns:
-            pub[c] = None
+    if acumular and isinstance(st.session_state.get("datos"), pd.DataFrame):
+        pub = pd.concat([st.session_state["datos"], pub], ignore_index=True)
     pub = (pub[core.PUBLICAS]
            .drop_duplicates(["fecha", "archivo", "record_id"], keep="last")
-           .sort_values(["fecha", "archivo"]))
+           .sort_values(["fecha", "archivo"])
+           .reset_index(drop=True))
 
-    PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    pub.to_parquet(PARQUET, index=False, compression="zstd")
-    st.cache_data.clear()
+    st.session_state["datos"] = pub
     fechas = ", ".join(sorted(pub["fecha"].dropna().astype(str).unique()))
-    st.success(f"{len(pares)} `.rsl` · {len(pub):,} filas (+{len(pub) - antes:,}) · {fechas}")
-
-    if not _persistir_en_repo(PARQUET.read_bytes()):
-        st.info("Cargado en esta sesión. Si la app se reinicia hay que volver a "
-                "subir (o configurar el secret `[github]`).")
+    st.success(f"{len(pares)} `.rsl` procesados · {len(pub):,} filas · {fechas}")
     st.rerun()
 
 
-st.sidebar.header("Datos")
-_fc = fechas_cargadas(PARQUET.stat().st_mtime if PARQUET.exists() else 0.0)
-if _fc:
-    _rango = _fc[0] if len(_fc) == 1 else f"{_fc[0]} → {_fc[-1]}"
-    st.sidebar.caption(
-        f"📅 Cargadas: {_rango}  ·  {len(_fc)} jornada" + ("s" if len(_fc) != 1 else ""))
+def _para_panel(pub: pd.DataFrame) -> pd.DataFrame:
+    df = pub.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce").dt.date
+    for c in ("contactado", "contestador", "gestion_agente", "tipificado"):
+        df[c] = df[c].fillna(0).astype(bool)
+    df["agente_id"] = df["agente_id"].fillna("").astype(str).str.strip()
+    return df
 
-with st.sidebar.expander("Cargar datos", expanded=not PARQUET.exists()):
-    st.caption("Subí los `.rsl` del día (o un `.zip` con varios). Se anonimizan "
-               "al instante y se suman al consolidado.")
-    rsls = st.file_uploader("Archivos .rsl / .zip", type=["rsl", "zip"],
-                            accept_multiple_files=True, key="up_rsl")
-    if rsls and st.button("Procesar y actualizar", type="primary", width='stretch'):
-        _procesar_rsl(rsls)
 
-    st.divider()
-    st.caption("Avanzado: reemplazar todo con un `publico.parquet` ya armado.")
-    upp = st.file_uploader("publico.parquet", type=["parquet"], key="up_parquet")
-    if upp is not None and st.button("Reemplazar consolidado", width='stretch'):
-        PARQUET.parent.mkdir(parents=True, exist_ok=True)
-        PARQUET.write_bytes(upp.getbuffer())
-        st.cache_data.clear()
-        _persistir_en_repo(PARQUET.read_bytes())
-        st.success("Consolidado reemplazado.")
+# ---- barra lateral ----
+with st.sidebar:
+    lc, bc = st.columns([2, 1])
+    lc.caption(f"👤 {st.session_state.get('_auth_user', '')}")
+    if bc.button("Salir", help="Cerrar sesión"):
+        st.session_state.clear()
         st.rerun()
 
-    if _fc:
-        st.caption("Fechas en el consolidado: " + ", ".join(_fc))
+st.sidebar.header("Datos de la sesión")
+_datos = st.session_state.get("datos")
+_hay = isinstance(_datos, pd.DataFrame) and not _datos.empty
+if _hay:
+    _f = sorted(_datos["fecha"].dropna().astype(str).unique())
+    _rango = _f[0] if len(_f) == 1 else f"{_f[0]} → {_f[-1]}"
+    st.sidebar.caption(f"📅 {_rango}  ·  {len(_f)} jornada" + ("s" if len(_f) != 1 else "")
+                       + f"  ·  {len(_datos):,} filas")
 
-if not PARQUET.exists():
-    st.info("Todavía no hay datos. Subí un `publico.parquet` desde la barra lateral.")
+with st.sidebar.expander("Cargar .rsl", expanded=not _hay):
+    st.caption("Se procesan en el momento para mostrar el panel. **No se guardan** "
+               "en ningún lado: al recargar o cerrar hay que volver a subirlos.")
+    rsls = st.file_uploader("Archivos .rsl / .zip", type=["rsl", "zip"],
+                            accept_multiple_files=True, key="up_rsl")
+    acumular = st.checkbox("Sumar a lo ya cargado en esta sesión", value=True,
+                           disabled=not _hay)
+    if rsls and st.button("Procesar", type="primary", width='stretch'):
+        _procesar_rsl(rsls, acumular and _hay)
+    if _hay and st.button("Vaciar datos", width='stretch'):
+        st.session_state.pop("datos", None)
+        st.rerun()
+
+if not _hay:
+    st.info("Subí los `.rsl` del día desde la barra lateral para ver el panel. "
+            "Los datos se procesan en memoria y no se guardan.")
     st.stop()
 
-MT = PARQUET.stat().st_mtime
-df = cargar(MT)
-if df.empty:
-    st.warning("El consolidado está vacío.")
-    st.stop()
+df = _para_panel(_datos)
 
 # --------------------------------- Filtros -------------------------------
 st.sidebar.divider()
@@ -304,7 +214,7 @@ if d.empty:
 # --------------------------------- Tableros -----------------------------
 fechas = ", ".join(sorted(str(x) for x in d["fecha"].dropna().unique()))
 st.title("📞 Panel Llamadas_Turnos")
-st.caption(f"Discador · campañas de retención Claro · jornada(s): {fechas}  ·  datos anonimizados")
+st.caption(f"Discador · campañas de retención Claro · jornada(s): {fechas}  ·  datos anonimizados en memoria")
 
 paneles.kpi_row(d)
 st.divider()

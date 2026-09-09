@@ -1,5 +1,6 @@
 *.rsl
 *.db
+*.parquet
 .salt
 secrets.toml
 .streamlit/secrets.toml
