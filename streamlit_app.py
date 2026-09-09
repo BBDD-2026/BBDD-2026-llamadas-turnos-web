@@ -1,23 +1,32 @@
 """
 Panel Llamadas_Turnos — versión ONLINE (Streamlit Community Cloud)
 -----------------------------------------------------------------
-Lee un consolidado YA SANITIZADO (`data/publico.parquet`): el teléfono viene
-hasheado, no hay nombres ni datos de clientes. Ese archivo lo genera
-`publicar.py` en la máquina donde están los .rsl.
+Trabaja sobre `data/publico.parquet`, un consolidado SANITIZADO: el teléfono
+está hasheado, no hay nombres ni datos de clientes.
 
-Acceso protegido por usuario/contraseña definidos en los Secrets de la app
-(ver bloque de comentario más abajo, sección "Acceso").
+Se puede alimentar de dos formas:
+  1) subiendo los `.rsl` (o un `.zip`) desde la barra lateral: se parsean y
+     anonimizan en el momento (el teléfono se hashea con el secret `salt`);
+  2) subiendo un `publico.parquet` ya armado por `publicar.py`.
+
+Acceso protegido por usuario/contraseña (Secrets de la app, sección "Acceso").
+Persistencia: en Community Cloud el disco es efímero. Para que las cargas
+sobrevivan un reinicio, configurar el secret `[github]` (token + repo) o usar
+`python publicar.py --push`.
 
 Este es el entrypoint que usa Streamlit Community Cloud.
 """
 from __future__ import annotations
 
 import hmac
+import io
+import zipfile
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+import core
 import paneles
 
 st.set_page_config(page_title="Panel Llamadas_Turnos", page_icon="📞", layout="wide")
@@ -122,23 +131,138 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
+SALT = str(st.secrets.get("salt", "")).strip()
+
+
+def _persistir_en_repo(contenido: bytes) -> bool:
+    """Si hay secret [github], commitea el parquet al repo (redeploy). Opcional."""
+    conf = st.secrets.get("github", None)
+    if not conf or not conf.get("token"):
+        return False
+    import base64
+    import json
+    import urllib.request
+
+    repo = conf.get("repo", "")
+    ruta = conf.get("path", "data/publico.parquet")
+    rama = conf.get("branch", "main")
+    api = f"https://api.github.com/repos/{repo}/contents/{ruta}"
+    hdr = {"Authorization": f"Bearer {conf['token']}",
+           "Accept": "application/vnd.github+json",
+           "User-Agent": "llamadas-turnos-panel"}
+    sha = None
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(f"{api}?ref={rama}", headers=hdr)) as r:
+            sha = json.load(r).get("sha")
+    except Exception:
+        pass
+    cuerpo = json.dumps({
+        "message": "datos: carga desde el panel online",
+        "content": base64.b64encode(contenido).decode(),
+        "branch": rama, **({"sha": sha} if sha else {}),
+    }).encode()
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(api, data=cuerpo, headers=hdr, method="PUT")).read()
+        st.success("Guardado en el repo — la app redeploya en ~1 min.")
+        return True
+    except Exception as e:
+        st.warning(f"No se pudo guardar en el repo ({e}).")
+        return False
+
+
+def _pares_rsl(subidos):
+    """Expande .zip; devuelve [(nombre, bytes), ...] solo de los .rsl."""
+    pares = []
+    for uf in subidos:
+        nombre, datos = uf.name, uf.getvalue()
+        if nombre.lower().endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(datos)) as z:
+                for zi in z.infolist():
+                    if not zi.is_dir() and zi.filename.lower().endswith(".rsl"):
+                        pares.append((Path(zi.filename).name, z.read(zi)))
+        elif nombre.lower().endswith(".rsl"):
+            pares.append((nombre, datos))
+    return pares
+
+
+def _procesar_rsl(subidos) -> None:
+    if not SALT:
+        st.error("Falta el secret `salt` (una cadena aleatoria fija) para "
+                 "anonimizar los teléfonos. Agregalo en Settings → Secrets.")
+        return
+    pares = _pares_rsl(subidos)
+    if not pares:
+        st.warning("No se encontraron `.rsl` en lo subido.")
+        return
+
+    bar = st.progress(0.0, text=f"0 / {len(pares)}")
+    partes = []
+    for i, (nombre, datos) in enumerate(pares, 1):
+        filas = core.rsl_bytes_a_filas(datos, nombre)
+        partes.append(core.sanitizar(pd.DataFrame(filas, columns=core.COLUMNS), SALT))
+        bar.progress(i / len(pares), text=f"{i} / {len(pares)} · {nombre[:34]}")
+    bar.empty()
+    pub = pd.concat(partes, ignore_index=True)
+
+    antes = 0
+    if PARQUET.exists():
+        actual = pd.read_parquet(PARQUET)
+        if "archivo" not in actual.columns:
+            actual["archivo"] = "historico"
+        if "record_id" not in actual.columns:
+            actual["record_id"] = actual.index.astype(str)
+        antes = len(actual)
+        pub = pd.concat([actual, pub], ignore_index=True)
+
+    for c in core.PUBLICAS:
+        if c not in pub.columns:
+            pub[c] = None
+    pub = (pub[core.PUBLICAS]
+           .drop_duplicates(["fecha", "archivo", "record_id"], keep="last")
+           .sort_values(["fecha", "archivo"]))
+
+    PARQUET.parent.mkdir(parents=True, exist_ok=True)
+    pub.to_parquet(PARQUET, index=False, compression="zstd")
+    st.cache_data.clear()
+    fechas = ", ".join(sorted(pub["fecha"].dropna().astype(str).unique()))
+    st.success(f"{len(pares)} `.rsl` · {len(pub):,} filas (+{len(pub) - antes:,}) · {fechas}")
+
+    if not _persistir_en_repo(PARQUET.read_bytes()):
+        st.info("Cargado en esta sesión. Si la app se reinicia hay que volver a "
+                "subir (o configurar el secret `[github]`).")
+    st.rerun()
+
+
 st.sidebar.header("Datos")
 _fc = fechas_cargadas(PARQUET.stat().st_mtime if PARQUET.exists() else 0.0)
 if _fc:
     _rango = _fc[0] if len(_fc) == 1 else f"{_fc[0]} → {_fc[-1]}"
     st.sidebar.caption(
         f"📅 Cargadas: {_rango}  ·  {len(_fc)} jornada" + ("s" if len(_fc) != 1 else ""))
-with st.sidebar.expander("Actualizar consolidado"):
-    if _fc:
-        st.caption("Fechas en el consolidado:")
-        st.code("\n".join(_fc), language=None)
-    up = st.file_uploader("Subir publico.parquet", type=["parquet"])
-    if up is not None and st.button("Reemplazar", width='stretch'):
+
+with st.sidebar.expander("Cargar datos", expanded=not PARQUET.exists()):
+    st.caption("Subí los `.rsl` del día (o un `.zip` con varios). Se anonimizan "
+               "al instante y se suman al consolidado.")
+    rsls = st.file_uploader("Archivos .rsl / .zip", type=["rsl", "zip"],
+                            accept_multiple_files=True, key="up_rsl")
+    if rsls and st.button("Procesar y actualizar", type="primary", width='stretch'):
+        _procesar_rsl(rsls)
+
+    st.divider()
+    st.caption("Avanzado: reemplazar todo con un `publico.parquet` ya armado.")
+    upp = st.file_uploader("publico.parquet", type=["parquet"], key="up_parquet")
+    if upp is not None and st.button("Reemplazar consolidado", width='stretch'):
         PARQUET.parent.mkdir(parents=True, exist_ok=True)
-        PARQUET.write_bytes(up.getbuffer())
+        PARQUET.write_bytes(upp.getbuffer())
         st.cache_data.clear()
-        st.success("Consolidado actualizado.")
+        _persistir_en_repo(PARQUET.read_bytes())
+        st.success("Consolidado reemplazado.")
         st.rerun()
+
+    if _fc:
+        st.caption("Fechas en el consolidado: " + ", ".join(_fc))
 
 if not PARQUET.exists():
     st.info("Todavía no hay datos. Subí un `publico.parquet` desde la barra lateral.")
