@@ -5,12 +5,14 @@ Lee un consolidado YA SANITIZADO (`data/publico.parquet`): el teléfono viene
 hasheado, no hay nombres ni datos de clientes. Ese archivo lo genera
 `publicar.py` en la máquina donde están los .rsl.
 
-Acceso protegido por contraseña (`.streamlit/secrets.toml` →  password = "…").
+Acceso protegido por usuario/contraseña definidos en los Secrets de la app
+(ver bloque de comentario más abajo, sección "Acceso").
 
 Este es el entrypoint que usa Streamlit Community Cloud.
 """
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 
 import pandas as pd
@@ -44,24 +46,51 @@ CAT_FILTROS = [
 
 
 # --------------------------------- Acceso --------------------------------
-def pedir_password() -> None:
-    esperada = st.secrets.get("password", None)
-    if not esperada:
-        st.error("Falta configurar `password` en los secrets de la app.")
+# Credenciales en los Secrets de la app (Streamlit Cloud → Settings → Secrets):
+#
+#   # opción A — varios usuarios:
+#   [passwords]
+#   enzo       = "clave-de-enzo"
+#   supervisor = "clave-del-super"
+#   tmk        = "clave-compartida"
+#
+#   # opción B — una sola clave para todo el equipo:
+#   password = "clave-unica"
+def _cred_ok(usuario: str, clave: str) -> bool:
+    if not clave:
+        return False
+    tabla = st.secrets.get("passwords", None)
+    if tabla is not None:
+        real = tabla.get(usuario)
+        return real is not None and hmac.compare_digest(str(real), clave)
+    unica = st.secrets.get("password", None)
+    return bool(unica) and hmac.compare_digest(str(unica), clave)
+
+
+def pedir_login() -> None:
+    multi = st.secrets.get("passwords", None)
+    if multi is None and not st.secrets.get("password"):
+        st.error("Faltan credenciales en los Secrets de la app "
+                 "(`[passwords]` con usuarios, o `password` con una clave única).")
         st.stop()
-    if st.session_state.get("_auth_ok"):
+    if st.session_state.get("_auth_user"):
         return
+
     st.title("📞 Panel Llamadas_Turnos")
-    pw = st.text_input("Contraseña", type="password")
-    if pw and pw == esperada:
-        st.session_state["_auth_ok"] = True
-        st.rerun()
-    elif pw:
-        st.error("Contraseña incorrecta.")
+    with st.form("login"):
+        usuario = st.text_input("Usuario") if multi is not None else "equipo"
+        clave = st.text_input("Contraseña", type="password")
+        entrar = st.form_submit_button("Entrar")
+    if entrar:
+        if _cred_ok(usuario.strip(), clave):
+            st.session_state["_auth_user"] = usuario.strip() or "equipo"
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos.")
     st.stop()
 
 
-pedir_password()
+pedir_login()
 
 
 # --------------------------------- Datos ---------------------------------
@@ -77,7 +106,14 @@ def cargar(_mtime: float) -> pd.DataFrame:
     return df
 
 
-# ---- barra lateral: reemplazar el consolidado (solo instancia actual) ----
+# ---- barra lateral ----
+with st.sidebar:
+    lc, bc = st.columns([2, 1])
+    lc.caption(f"👤 {st.session_state.get('_auth_user', '')}")
+    if bc.button("Salir", help="Cerrar sesión"):
+        st.session_state.clear()
+        st.rerun()
+
 st.sidebar.header("Datos")
 with st.sidebar.expander("Actualizar consolidado"):
     st.caption(
