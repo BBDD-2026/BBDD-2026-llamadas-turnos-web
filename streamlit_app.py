@@ -23,6 +23,8 @@ import streamlit as st
 import core
 import paneles
 
+BUILD = "2026-09-09b · incluye Ventas (preventa)"
+
 st.set_page_config(page_title="Panel Llamadas_Turnos", page_icon="📞", layout="wide")
 
 st.markdown(
@@ -216,7 +218,8 @@ if d.empty:
 # --------------------------------- Tableros -----------------------------
 fechas = ", ".join(sorted(str(x) for x in d["fecha"].dropna().unique()))
 st.title("📞 Panel Llamadas_Turnos")
-st.caption(f"Discador · campañas de retención Claro · jornada(s): {fechas}  ·  datos anonimizados en memoria")
+st.caption(f"Discador · campañas de retención Claro · jornada(s): {fechas}  ·  "
+           f"datos anonimizados en memoria  ·  build {BUILD}")
 
 paneles.kpi_row(d)
 st.divider()
