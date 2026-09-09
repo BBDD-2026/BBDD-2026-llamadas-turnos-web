@@ -5,24 +5,21 @@ el consolidado `data/publico.parquet` viene con el teléfono hasheado y sin
 nombres ni datos de clientes. Lo genera `publicar.py` en la máquina donde están
 los `.rsl`.
 
-## Puesta en marcha (una sola vez)
+## Puesta en marcha
 
-1. Creá un repo **público** en GitHub, p. ej. `BBDD-2026/llamadas-turnos-web`, y
-   dejá que esta carpeta sea ese repo:
-   ```bash
-   cd web
-   git init -b main
-   git remote add origin https://github.com/BBDD-2026/llamadas-turnos-web.git
-   git add -A && git commit -m "panel online inicial"
-   git push -u origin main
-   ```
-2. Entrá a <https://share.streamlit.io> → **New app** → elegí el repo, rama
-   `main`, archivo `streamlit_app.py`.
-3. En **Advanced settings → Secrets** pegá:
+Repo: **`BBDD-2026/BBDD-2026-llamadas-turnos-web`** (público). Esta carpeta ya es
+ese repo git (rama `main`, primer push hecho).
+
+Falta conectar el deploy:
+
+1. Entrá a <https://share.streamlit.io> → **New app** → repo
+   `BBDD-2026/BBDD-2026-llamadas-turnos-web`, rama `main`, archivo
+   `streamlit_app.py`.
+2. En **Advanced settings → Secrets** pegá:
    ```toml
    password = "una-clave-para-el-equipo"
    ```
-4. Deploy. La URL queda tipo `https://llamadas-turnos-web.streamlit.app`.
+3. Deploy. La URL queda tipo `https://bbdd-2026-llamadas-turnos-web.streamlit.app`.
 
 ## Actualizar los datos
 
